@@ -26,7 +26,7 @@ def scrape_tanks():
     chrome_options.add_argument("--disable-gpu")
     chrome_options.add_argument("--user-data-dir=/tmp/chrome-data")
 
-    chrome_service = Service(executable_path=CHROMEDRIVER_PATH)
+    chrome_service = Service(executable_path=CHROMEDRIVER_PATH,log_path="/tmp/chromedriver.log",service_args=["--verbose"])
     driver = webdriver.Chrome(service=chrome_service, options=chrome_options)
 
     try:
