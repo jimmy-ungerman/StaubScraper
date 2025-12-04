@@ -1,96 +1,81 @@
 import os
-import time
-import re
 from flask import Flask, jsonify
 from selenium import webdriver
+from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from bs4 import BeautifulSoup
 
-EMAIL = os.getenv("EMAIL")
-PASSWORD = os.getenv("PASSWORD")
-
-if not EMAIL or not PASSWORD:
-    raise Exception("Please set EMAIL and PASSWORD environment variables")
+# Disable Selenium Manager BEFORE importing webdriver
+os.environ["SELENIUM_MANAGER_DISABLED"] = "true"
 
 app = Flask(__name__)
 
-CACHE = None
-CACHE_TIMESTAMP = 0
-CACHE_TTL = 6 * 60 * 60
-
-SELENIUM_REMOTE_URL = "http://localhost:4444/wd/hub"
+EMAIL = os.environ.get("EMAIL")
+PASSWORD = os.environ.get("PASSWORD")
+CHROMEDRIVER_PATH = "/usr/bin/chromedriver"  # Correct path in this image
+SELENIUM_WAIT = 15  # seconds
 
 def scrape_tanks():
-    global CACHE, CACHE_TIMESTAMP
-
-    if CACHE and (time.time() - CACHE_TIMESTAMP) < CACHE_TTL:
-        return CACHE
-
     chrome_options = Options()
-    chrome_options.add_argument("--headless=new")
-    chrome_options.add_argument("--disable-dev-shm-usage")
+    chrome_options.add_argument("--headless")
     chrome_options.add_argument("--no-sandbox")
-    chrome_options.add_argument("--remote-debugging-port=9222")
+    chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--disable-gpu")
-    chrome_options.add_argument("--disable-software-rasterizer")
+    chrome_options.add_argument("--disable-extensions")
+    chrome_options.add_argument("--disable-infobars")
 
-    driver = webdriver.Remote(
-        command_executor=SELENIUM_REMOTE_URL,
-        options=chrome_options
-    )
+    chrome_service = Service(executable_path=CHROMEDRIVER_PATH)
+    driver = webdriver.Chrome(service=chrome_service, options=chrome_options)
 
     try:
+        # --- 1. Login ---
         driver.get("https://edstaub.myfuelportal.com/Account/Login")
-        WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.NAME, "EmailAddress")))
 
-        driver.find_element(By.NAME, "EmailAddress").send_keys(EMAIL)
-        driver.find_element(By.NAME, "Password").send_keys(PASSWORD)
-        driver.find_element(By.XPATH, "//button[@type='submit']").click()
-
-        WebDriverWait(driver, 10).until(
-            EC.presence_of_element_located((By.XPATH, "//h3[text()='Account Details']"))
+        WebDriverWait(driver, SELENIUM_WAIT).until(
+            EC.presence_of_element_located((By.ID, "EmailAddress"))
         )
 
+        driver.find_element(By.ID, "EmailAddress").send_keys(EMAIL)
+        driver.find_element(By.ID, "Password").send_keys(PASSWORD)
+        driver.find_element(By.CSS_SELECTOR, "button[type='submit']").click()
+
+        WebDriverWait(driver, SELENIUM_WAIT).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR, "h3.box-title"))
+        )
+
+        # --- 2. Navigate to Tank page ---
         driver.get("https://edstaub.myfuelportal.com/Tank")
-        WebDriverWait(driver, 10).until(
-            EC.presence_of_all_elements_located((By.CLASS_NAME, "tank-row"))
+
+        WebDriverWait(driver, SELENIUM_WAIT).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR, "div.progress-bar"))
         )
 
-        soup = BeautifulSoup(driver.page_source, "html.parser")
-        tanks = []
+        gallons_text = driver.find_element(
+            By.XPATH, "//div[contains(text(),'Approximately') and contains(text(),'gallons')]"
+        ).text
+        gallons = int(''.join(filter(str.isdigit, gallons_text)))
 
-        for row in soup.select("div.tank-row"):
-            name_span = row.select_one("div.col-sm-6.col-md-3 span.text-larger")
-            tank_name = name_span.get_text(strip=True) if name_span else "unknown"
+        percent_text = driver.find_element(By.CSS_SELECTOR, "div.progress-bar").get_attribute("aria-valuenow")
+        percent = float(percent_text)
 
-            progress = row.select_one("div.progress-bar")
-            percent_value = float(progress.get("aria-valuenow")) if progress else 0.0
+        tank_name = driver.find_element(By.CSS_SELECTOR, "span.text-larger").text
 
-            gallons_text_div = row.select_one("div.progress + div")
-            gallons = 0
-            if gallons_text_div:
-                match = re.search(r"(\d+)", gallons_text_div.get_text())
-                if match:
-                    gallons = int(match.group(1))
+        return [{"gallons": gallons, "percent": percent, "tank_name": tank_name}]
 
-            tanks.append({
-                "tank_name": tank_name,
-                "percent": percent_value,
-                "gallons": gallons
-            })
-
-        CACHE = tanks
-        CACHE_TIMESTAMP = time.time()
-        return tanks
     finally:
         driver.quit()
 
+
 @app.route("/tanks", methods=["GET"])
 def tanks_endpoint():
-    return jsonify(scrape_tanks())
+    try:
+        data = scrape_tanks()
+        return jsonify(data)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)

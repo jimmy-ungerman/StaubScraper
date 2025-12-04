@@ -1,15 +1,18 @@
+# Use Selenium standalone Chromium image
 FROM selenium/standalone-chromium:142.0
 
 USER root
 WORKDIR /app
 
+# Copy requirements and install Python packages
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Copy Flask app
 COPY app.py .
 
-RUN mkdir -p /dev/shm && chmod 777 /dev/shm
-
+# Expose Flask port
 EXPOSE 5000
 
-CMD ["bash", "-c", "nohup /opt/bin/entry_point.sh & python /app/app.py"]
+# Run Flask app; Selenium server is already running in this image
+CMD ["python", "app.py"]
