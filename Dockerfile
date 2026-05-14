@@ -1,18 +1,14 @@
-# Use Selenium standalone Chromium image
-FROM selenium/standalone-chromium:142.0
-
-USER root
+FROM golang:1.26-alpine AS builder
 WORKDIR /app
+COPY go.mod go.sum ./
+RUN go mod download
+COPY main.go .
+RUN CGO_ENABLED=0 go build -o staubscrape .
 
-# Copy requirements and install Python packages
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
-# Copy Flask app
-COPY app.py .
-
-# Expose Flask port
-EXPOSE 5000
-
-# Run Flask app; Selenium server is already running in this image
-CMD ["python", "app.py"]
+FROM alpine:3.22
+RUN apk add --no-cache chromium
+ENV CHROME_PATH=/usr/bin/chromium-browser
+WORKDIR /app
+COPY --from=builder /app/staubscrape .
+EXPOSE 5123
+CMD ["./staubscrape"]
