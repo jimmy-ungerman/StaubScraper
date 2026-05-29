@@ -153,9 +153,31 @@ func tanksHandler(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func healthHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	cache.RLock()
+	defer cache.RUnlock()
+
+	if cache.data == nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		json.NewEncoder(w).Encode(map[string]string{"status": "starting", "error": cache.err})
+		return
+	}
+	status := "ok"
+	if cache.err != "" {
+		status = "degraded"
+	}
+	json.NewEncoder(w).Encode(map[string]any{
+		"status":     status,
+		"stale":      cache.err != "",
+		"updated_at": cache.updatedAt,
+	})
+}
+
 func main() {
 	go poll()
 	http.HandleFunc("/tanks", tanksHandler)
+	http.HandleFunc("/health", healthHandler)
 	log.Println("Listening on :5123")
 	log.Fatal(http.ListenAndServe(":5123", nil))
 }
