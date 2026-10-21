@@ -83,8 +83,8 @@ jobs:
               }
               if (/^feat(\(.+\))?:/.test(msg) && bump !== 'major') bump = 'minor';
               if (/^(fix|perf|revert)(\(.+\))?:/.test(msg) && !bump) bump = 'patch';
-              // Mirrors the releaseRule in .releaserc: chore(deps) -> patch
-              if (/^chore\(deps\):/.test(msg) && !bump) bump = 'patch';
+              // Mirrors the releaseRules in .releaserc: chore(deps) and build -> patch
+              if (/^(chore\(deps\)|build)(\(.+\))?:/.test(msg) && !bump) bump = 'patch';
             }
 
             const marker = '<!-- semantic-release-preview -->';
