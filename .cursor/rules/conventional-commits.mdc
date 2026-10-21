@@ -1,0 +1,28 @@
+---
+description: Conventional Commits for every Cursor commit and pull request title
+alwaysApply: true
+---
+
+# Conventional Commits
+
+Use this subject format for every commit and pull request title:
+
+```
+type(optional-scope): subject
+```
+
+Allowed types: `feat`, `fix`, `docs`, `style`, `refactor`, `perf`, `test`, `build`, `ci`, `chore`, `revert`.
+
+- Subject is imperative, lowercase, and has no trailing period.
+- Keep the subject within 72 characters.
+- A body is optional. When present, it explains why.
+
+```
+feat: report scrape freshness on its own endpoint
+
+ci: check Go tests before publishing the image
+
+fix(scrape): fail when the tank name is missing
+```
+
+Do not use informal subjects such as `add health` or `still weird`.
