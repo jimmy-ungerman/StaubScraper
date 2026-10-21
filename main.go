@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"math"
 	"net/http"
@@ -16,11 +17,16 @@ import (
 	"github.com/chromedp/chromedp"
 )
 
-const baseURL = "https://edstaub.myfuelportal.com"
+const (
+	baseURL = "https://edstaub.myfuelportal.com"
+
+	pollInterval    = 2 * time.Hour
+	scrapeFreshness = pollInterval + 15*time.Minute
+)
 
 var (
-	email    = os.Getenv("EMAIL")
-	password = os.Getenv("PASSWORD")
+	email     = os.Getenv("EMAIL")
+	password  = os.Getenv("PASSWORD")
 	gallonsRe = regexp.MustCompile(`Approximately\s+([\d,]+)\s+gallons`)
 )
 
@@ -104,19 +110,36 @@ func scrape() ([]Tank, error) {
 		return nil, err
 	}
 
-	var tank Tank
-	tank.TankName = strings.TrimSpace(tankName)
-	pct, _ := strconv.ParseFloat(percentText, 64)
-	tank.Percent = int(math.Round(pct))
-	if m := gallonsRe.FindStringSubmatch(gallonsText); len(m) > 1 {
-		tank.Gallons, _ = strconv.Atoi(strings.ReplaceAll(m[1], ",", ""))
+	tank, err := tankFromExtract(tankName, percentText, gallonsText)
+	if err != nil {
+		return nil, err
 	}
-
 	return []Tank{tank}, nil
 }
 
+func tankFromExtract(tankName, percentText, gallonsText string) (Tank, error) {
+	name := strings.TrimSpace(tankName)
+	if name == "" {
+		return Tank{}, fmt.Errorf("tank name missing")
+	}
+	m := gallonsRe.FindStringSubmatch(gallonsText)
+	if len(m) < 2 {
+		return Tank{}, fmt.Errorf("gallons text missing")
+	}
+	gallons, err := strconv.Atoi(strings.ReplaceAll(m[1], ",", ""))
+	if err != nil {
+		return Tank{}, fmt.Errorf("parse gallons: %w", err)
+	}
+	pct, _ := strconv.ParseFloat(percentText, 64)
+	return Tank{
+		TankName: name,
+		Gallons:  gallons,
+		Percent:  int(math.Round(pct)),
+	}, nil
+}
+
 func poll() {
-	ticker := time.NewTicker(2 * time.Hour)
+	ticker := time.NewTicker(pollInterval)
 	for {
 		tanks, err := scrape()
 		cache.Lock()
@@ -155,29 +178,49 @@ func tanksHandler(w http.ResponseWriter, r *http.Request) {
 
 func healthHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+func scrapeHealthHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
 	cache.RLock()
 	defer cache.RUnlock()
 
-	if cache.data == nil {
+	if errMsg := scrapeUnhealthyReason(); errMsg != "" {
 		w.WriteHeader(http.StatusServiceUnavailable)
-		json.NewEncoder(w).Encode(map[string]string{"status": "starting", "error": cache.err})
+		json.NewEncoder(w).Encode(map[string]any{
+			"status":     "fail",
+			"error":      errMsg,
+			"updated_at": cache.updatedAt,
+		})
 		return
 	}
-	status := "ok"
-	if cache.err != "" {
-		status = "degraded"
-	}
 	json.NewEncoder(w).Encode(map[string]any{
-		"status":     status,
-		"stale":      cache.err != "",
+		"status":     "ok",
 		"updated_at": cache.updatedAt,
 	})
+}
+
+// scrapeUnhealthyReason reports why the latest Staub reading is not usable.
+// Caller must hold cache.RLock.
+func scrapeUnhealthyReason() string {
+	if cache.err != "" {
+		return cache.err
+	}
+	if len(cache.data) == 0 || strings.TrimSpace(cache.data[0].TankName) == "" {
+		return "no successful scrape"
+	}
+	if cache.updatedAt.IsZero() || time.Since(cache.updatedAt) > scrapeFreshness {
+		return "scrape data is stale"
+	}
+	return ""
 }
 
 func main() {
 	go poll()
 	http.HandleFunc("/tanks", tanksHandler)
 	http.HandleFunc("/health", healthHandler)
+	http.HandleFunc("/health/scrape", scrapeHealthHandler)
 	log.Println("Listening on :5123")
 	log.Fatal(http.ListenAndServe(":5123", nil))
 }
