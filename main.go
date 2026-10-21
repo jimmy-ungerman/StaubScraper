@@ -234,6 +234,7 @@ func authorize(w http.ResponseWriter, r *http.Request) bool {
 	}
 	got, ok := bearerToken(r.Header.Get("Authorization"))
 	if !ok || !tokenMatches(got, configured) {
+		log.Printf("unauthorized %s %s from %s", r.Method, r.URL.Path, r.RemoteAddr)
 		w.WriteHeader(http.StatusUnauthorized)
 		json.NewEncoder(w).Encode(map[string]string{"error": "unauthorized"})
 		return false
@@ -259,7 +260,32 @@ func tokenMatches(got, want string) bool {
 	return subtle.ConstantTimeCompare(sumGot[:], sumWant[:]) == 1
 }
 
+func healthcheck(url string) error {
+	resp, err := http.Get(url)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	var body struct {
+		Status string `json:"status"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return err
+	}
+	if resp.StatusCode != http.StatusOK || body.Status != "ok" {
+		return fmt.Errorf("status %d %q", resp.StatusCode, body.Status)
+	}
+	return nil
+}
+
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "health" {
+		if err := healthcheck("http://127.0.0.1:5123/health"); err != nil {
+			log.Printf("health check: %v", err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
 	if os.Getenv("API_TOKEN") == "" {
 		log.Println("API_TOKEN is unset; tank routes will reject requests")
 	}

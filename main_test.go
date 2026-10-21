@@ -1,9 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
+	"log"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -201,6 +204,7 @@ func TestProtectedRoutesRequireToken(t *testing.T) {
 
 	t.Run("missing bearer", func(t *testing.T) {
 		t.Setenv("API_TOKEN", testToken)
+		logs := captureLog(t)
 		for _, route := range routes {
 			req := httptest.NewRequest(http.MethodGet, route.path, nil)
 			rr := httptest.NewRecorder()
@@ -213,11 +217,13 @@ func TestProtectedRoutesRequireToken(t *testing.T) {
 				t.Fatalf("%s error = %#v", route.path, body["error"])
 			}
 		}
+		assertUnauthorizedLog(t, logs.String(), "")
 	})
 
 	t.Run("wrong bearer", func(t *testing.T) {
 		t.Setenv("API_TOKEN", testToken)
 		supplied := "not-the-token"
+		logs := captureLog(t)
 		for _, route := range routes {
 			req := httptest.NewRequest(http.MethodGet, route.path, nil)
 			req.Header.Set("Authorization", "Bearer "+supplied)
@@ -234,5 +240,47 @@ func TestProtectedRoutesRequireToken(t *testing.T) {
 				t.Fatalf("%s response includes the supplied token", route.path)
 			}
 		}
+		assertUnauthorizedLog(t, logs.String(), supplied)
 	})
+}
+
+func captureLog(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+	return &buf
+}
+
+func assertUnauthorizedLog(t *testing.T, logs, supplied string) {
+	t.Helper()
+	for _, path := range []string{"/tanks", "/health/scrape"} {
+		if !strings.Contains(logs, "unauthorized GET "+path) {
+			t.Fatalf("log missing unauthorized line for %s: %s", path, logs)
+		}
+	}
+	if strings.Contains(logs, testToken) {
+		t.Fatal("log includes API token")
+	}
+	if supplied != "" && strings.Contains(logs, supplied) {
+		t.Fatal("log includes the supplied token")
+	}
+}
+
+func TestHealthcheck(t *testing.T) {
+	okSrv := httptest.NewServer(http.HandlerFunc(healthHandler))
+	t.Cleanup(okSrv.Close)
+	if err := healthcheck(okSrv.URL + "/health"); err != nil {
+		t.Fatal(err)
+	}
+
+	badSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		json.NewEncoder(w).Encode(map[string]string{"status": "fail"})
+	}))
+	t.Cleanup(badSrv.Close)
+	if err := healthcheck(badSrv.URL); err == nil {
+		t.Fatal("expected healthcheck to fail")
+	}
 }
