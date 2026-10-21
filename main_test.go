@@ -4,9 +4,12 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
+
+const testToken = "test-token"
 
 func resetCache(data []Tank, err string, updated time.Time) {
 	cache.Lock()
@@ -14,6 +17,12 @@ func resetCache(data []Tank, err string, updated time.Time) {
 	cache.data = data
 	cache.err = err
 	cache.updatedAt = updated
+}
+
+func authedRequest(method, path string) *http.Request {
+	req := httptest.NewRequest(method, path, nil)
+	req.Header.Set("Authorization", "Bearer "+testToken)
+	return req
 }
 
 func decodeJSON(t *testing.T, rr *httptest.ResponseRecorder) map[string]any {
@@ -29,6 +38,7 @@ func decodeJSON(t *testing.T, rr *httptest.ResponseRecorder) map[string]any {
 }
 
 func TestHealthAlwaysReturnsJSON(t *testing.T) {
+	t.Setenv("API_TOKEN", testToken)
 	resetCache(nil, "login failed", time.Time{})
 
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
@@ -100,9 +110,10 @@ func TestScrapeHealth(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("API_TOKEN", testToken)
 			resetCache(tt.data, tt.err, tt.updated)
 
-			req := httptest.NewRequest(http.MethodGet, "/health/scrape", nil)
+			req := authedRequest(http.MethodGet, "/health/scrape")
 			rr := httptest.NewRecorder()
 			scrapeHealthHandler(rr, req)
 
@@ -124,10 +135,11 @@ func TestScrapeHealth(t *testing.T) {
 }
 
 func TestTanksServesLastReadingAfterScrapeError(t *testing.T) {
+	t.Setenv("API_TOKEN", testToken)
 	updated := time.Now().UTC().Add(-time.Hour)
 	resetCache([]Tank{{TankName: "House", Gallons: 1200, Percent: 40}}, "login failed", updated)
 
-	req := httptest.NewRequest(http.MethodGet, "/tanks", nil)
+	req := authedRequest(http.MethodGet, "/tanks")
 	rr := httptest.NewRecorder()
 	tanksHandler(rr, req)
 
@@ -159,4 +171,68 @@ func TestTankFromExtract(t *testing.T) {
 	if _, err := tankFromExtract("House", "10", "tank level unavailable"); err == nil {
 		t.Fatal("expected error when gallons text does not match")
 	}
+}
+
+func TestProtectedRoutesRequireToken(t *testing.T) {
+	resetCache([]Tank{{TankName: "House", Gallons: 1200, Percent: 40}}, "", time.Now().UTC())
+	routes := []struct {
+		path    string
+		handler http.HandlerFunc
+	}{
+		{"/tanks", tanksHandler},
+		{"/health/scrape", scrapeHealthHandler},
+	}
+
+	t.Run("unset token", func(t *testing.T) {
+		t.Setenv("API_TOKEN", "")
+		for _, route := range routes {
+			req := httptest.NewRequest(http.MethodGet, route.path, nil)
+			rr := httptest.NewRecorder()
+			route.handler(rr, req)
+			if rr.Code != http.StatusServiceUnavailable {
+				t.Fatalf("%s status = %d, want 503", route.path, rr.Code)
+			}
+			body := decodeJSON(t, rr)
+			if body["error"] != "api token is not configured" {
+				t.Fatalf("%s error = %#v", route.path, body["error"])
+			}
+		}
+	})
+
+	t.Run("missing bearer", func(t *testing.T) {
+		t.Setenv("API_TOKEN", testToken)
+		for _, route := range routes {
+			req := httptest.NewRequest(http.MethodGet, route.path, nil)
+			rr := httptest.NewRecorder()
+			route.handler(rr, req)
+			if rr.Code != http.StatusUnauthorized {
+				t.Fatalf("%s status = %d, want 401", route.path, rr.Code)
+			}
+			body := decodeJSON(t, rr)
+			if body["error"] != "unauthorized" {
+				t.Fatalf("%s error = %#v", route.path, body["error"])
+			}
+		}
+	})
+
+	t.Run("wrong bearer", func(t *testing.T) {
+		t.Setenv("API_TOKEN", testToken)
+		supplied := "not-the-token"
+		for _, route := range routes {
+			req := httptest.NewRequest(http.MethodGet, route.path, nil)
+			req.Header.Set("Authorization", "Bearer "+supplied)
+			rr := httptest.NewRecorder()
+			route.handler(rr, req)
+			if rr.Code != http.StatusUnauthorized {
+				t.Fatalf("%s status = %d, want 401", route.path, rr.Code)
+			}
+			body := decodeJSON(t, rr)
+			if body["error"] != "unauthorized" {
+				t.Fatalf("%s error = %#v", route.path, body["error"])
+			}
+			if strings.Contains(rr.Body.String(), supplied) {
+				t.Fatalf("%s response includes the supplied token", route.path)
+			}
+		}
+	})
 }
