@@ -1,0 +1,17 @@
+# Read from the base branch. Settings apply only after this file is on main.
+version: 1
+
+triggers:
+  drafts: false
+  frequency: everyPush
+
+review:
+  effort: default
+  incremental: true
+
+prSummary:
+  mode: comment
+  riskScore: true
+
+autofix:
+  mode: disabled
