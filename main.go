@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -158,6 +160,9 @@ func poll() {
 }
 
 func tanksHandler(w http.ResponseWriter, r *http.Request) {
+	if !authorize(w, r) {
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	cache.RLock()
 	defer cache.RUnlock()
@@ -182,6 +187,9 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func scrapeHealthHandler(w http.ResponseWriter, r *http.Request) {
+	if !authorize(w, r) {
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	cache.RLock()
 	defer cache.RUnlock()
@@ -216,7 +224,45 @@ func scrapeUnhealthyReason() string {
 	return ""
 }
 
+func authorize(w http.ResponseWriter, r *http.Request) bool {
+	w.Header().Set("Content-Type", "application/json")
+	configured := os.Getenv("API_TOKEN")
+	if configured == "" {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		json.NewEncoder(w).Encode(map[string]string{"error": "api token is not configured"})
+		return false
+	}
+	got, ok := bearerToken(r.Header.Get("Authorization"))
+	if !ok || !tokenMatches(got, configured) {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]string{"error": "unauthorized"})
+		return false
+	}
+	return true
+}
+
+func bearerToken(header string) (string, bool) {
+	const prefix = "Bearer "
+	if len(header) < len(prefix) || !strings.EqualFold(header[:len(prefix)], prefix) {
+		return "", false
+	}
+	token := header[len(prefix):]
+	if token == "" || strings.Contains(token, " ") {
+		return "", false
+	}
+	return token, true
+}
+
+func tokenMatches(got, want string) bool {
+	sumGot := sha256.Sum256([]byte(got))
+	sumWant := sha256.Sum256([]byte(want))
+	return subtle.ConstantTimeCompare(sumGot[:], sumWant[:]) == 1
+}
+
 func main() {
+	if os.Getenv("API_TOKEN") == "" {
+		log.Println("API_TOKEN is unset; tank routes will reject requests")
+	}
 	go poll()
 	http.HandleFunc("/tanks", tanksHandler)
 	http.HandleFunc("/health", healthHandler)
