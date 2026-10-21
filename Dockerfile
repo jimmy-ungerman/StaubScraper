@@ -12,4 +12,6 @@ COPY --from=builder /app/staubscrape .
 EXPOSE 5123
 HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
   CMD ["/app/staubscrape", "health"]
-CMD ["/app/staubscrape"]
+# The base image starts headless-shell and treats CMD as a browser argument.
+ENTRYPOINT ["/app/staubscrape"]
+CMD []
