@@ -1,0 +1,124 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: jimmy-ungerman/staubscraper
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - run: go test ./...
+
+  build:
+    name: Build image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build (no push)
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  preview:
+    name: Release preview
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Get latest tag
+        id: latest-tag
+        run: |
+          LATEST=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
+          echo "tag=${LATEST}" >> "$GITHUB_OUTPUT"
+
+      - name: Compute and post release preview
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const latestTag = '${{ steps.latest-tag.outputs.tag }}';
+
+            const { data: commits } = await github.rest.pulls.listCommits({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number,
+            });
+
+            let bump = null;
+            for (const { commit } of commits) {
+              const msg = commit.message;
+              if (/BREAKING CHANGE/.test(msg) || /^[a-z]+(\(.+\))?!:/.test(msg)) {
+                bump = 'major';
+                break;
+              }
+              if (/^feat(\(.+\))?:/.test(msg) && bump !== 'major') bump = 'minor';
+              if (/^(fix|perf|revert)(\(.+\))?:/.test(msg) && !bump) bump = 'patch';
+              // Mirrors the releaseRule in .releaserc: chore(deps) -> patch
+              if (/^chore\(deps\):/.test(msg) && !bump) bump = 'patch';
+            }
+
+            const marker = '<!-- semantic-release-preview -->';
+            let body;
+
+            if (!bump) {
+              body = `${marker}\n📦 No new release will be created (no releasable commits).`;
+            } else {
+              const [major, minor, patch] = latestTag.replace('v', '').split('.').map(Number);
+              const next = bump === 'major' ? `${major + 1}.0.0`
+                         : bump === 'minor' ? `${major}.${minor + 1}.0`
+                         : `${major}.${minor}.${patch + 1}`;
+              body = `${marker}\n🚀 Merging this PR will release **v${next}**`;
+            }
+
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+
+            const existing = comments.find(c => c.body.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body,
+              });
+            }
