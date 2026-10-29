@@ -1,14 +1,16 @@
 package main
 
 import (
-	"context"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"math"
 	"net/http"
+	"net/http/cookiejar"
+	"net/url"
 	"os"
 	"regexp"
 	"strconv"
@@ -16,17 +18,18 @@ import (
 	"sync"
 	"time"
 
-	"github.com/chromedp/chromedp"
+	"github.com/PuerkitoBio/goquery"
 )
 
 const (
-	baseURL = "https://edstaub.myfuelportal.com"
+	userAgent = "staubscrape (+https://github.com/jimmy-ungerman/staubScrape)"
 
 	pollInterval    = 2 * time.Hour
 	scrapeFreshness = pollInterval + 15*time.Minute
 )
 
 var (
+	baseURL   = "https://edstaub.myfuelportal.com"
 	email     = os.Getenv("EMAIL")
 	password  = os.Getenv("PASSWORD")
 	gallonsRe = regexp.MustCompile(`Approximately\s+([\d,]+)\s+gallons`)
@@ -45,78 +48,119 @@ var cache struct {
 	updatedAt time.Time
 }
 
-func newBrowser() (context.Context, context.CancelFunc) {
-	opts := append(chromedp.DefaultExecAllocatorOptions[:],
-		chromedp.Flag("no-sandbox", true),
-		chromedp.Flag("disable-setuid-sandbox", true),
-		chromedp.Flag("disable-dev-shm-usage", true),
-	)
-	if os.Getenv("DEBUG") == "1" {
-		opts = append(opts, chromedp.Flag("headless", false))
+var errLoginRequired = errors.New("not logged in; check EMAIL and PASSWORD")
+
+func newClient() (*http.Client, error) {
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		return nil, err
 	}
-	if p := os.Getenv("CHROME_PATH"); p != "" {
-		opts = append(opts, chromedp.ExecPath(p))
-	}
-	allocCtx, allocCancel := chromedp.NewExecAllocator(context.Background(), opts...)
-	ctx, ctxCancel := chromedp.NewContext(allocCtx, chromedp.WithLogf(log.Printf))
-	return ctx, func() { ctxCancel(); allocCancel() }
+	return &http.Client{Jar: jar, Timeout: 30 * time.Second}, nil
 }
 
-func step(name string) chromedp.Action {
-	return chromedp.ActionFunc(func(ctx context.Context) error {
-		log.Printf("step: %s", name)
-		return nil
-	})
+// fetch requests a page and parses it. A page that still shows the login form
+// means the session was never established or has expired.
+func fetch(client *http.Client, req *http.Request) (*goquery.Document, error) {
+	req.Header.Set("User-Agent", userAgent)
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("%s %s: status %d", req.Method, req.URL.Path, resp.StatusCode)
+	}
+	doc, err := goquery.NewDocumentFromReader(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("parse %s: %w", req.URL.Path, err)
+	}
+	return doc, nil
+}
+
+func isLoginPage(doc *goquery.Document) bool {
+	return doc.Find(`form[action="/Account/Login"]`).Length() > 0
+}
+
+func login(client *http.Client) error {
+	req, _ := http.NewRequest(http.MethodGet, baseURL+"/Account/Login", nil)
+	doc, err := fetch(client, req)
+	if err != nil {
+		return err
+	}
+	token, ok := doc.Find(`form[action="/Account/Login"] input[name="__RequestVerificationToken"]`).Attr("value")
+	if !ok {
+		return fmt.Errorf("login form has no verification token")
+	}
+
+	form := url.Values{
+		"__RequestVerificationToken": {token},
+		"EmailAddress":               {email},
+		"Password":                   {password},
+		"RememberMe":                 {"false"},
+	}
+	req, _ = http.NewRequest(http.MethodPost, baseURL+"/Account/Login", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	doc, err = fetch(client, req)
+	if err != nil {
+		return err
+	}
+	if isLoginPage(doc) {
+		return errLoginRequired
+	}
+	return nil
 }
 
 func scrape() ([]Tank, error) {
-	ctx, cancel := newBrowser()
-	defer cancel()
-
-	ctx, cancel = context.WithTimeout(ctx, 60*time.Second)
-	defer cancel()
-
-	var gallonsText, percentText, tankName string
-
-	err := chromedp.Run(ctx,
-		step("navigate to login"),
-		chromedp.Navigate(baseURL+"/Account/Login"),
-		step("wait for email field"),
-		chromedp.WaitReady(`input[name="EmailAddress"][type="email"]`),
-		step("fill credentials"),
-		chromedp.SendKeys(`input[name="EmailAddress"][type="email"]`, email),
-		chromedp.SendKeys(`input[name="Password"]`, password),
-		step("submit login"),
-		chromedp.Click(`button[type="submit"]`),
-		step("wait for post-login page"),
-		chromedp.WaitVisible(`h3.box-title`),
-		step("navigate to tank page"),
-		chromedp.Navigate(baseURL+"/Tank"),
-		step("wait for progress bar"),
-		chromedp.WaitVisible(`div.progress-bar`),
-		step("extract data"),
-		chromedp.Text(`span.text-larger`, &tankName),
-		chromedp.AttributeValue(`div.progress-bar`, "aria-valuenow", &percentText, nil),
-		chromedp.Evaluate(`
-			(() => {
-				for (const d of document.querySelectorAll('div')) {
-					if (d.textContent.includes('Approximately') && d.textContent.includes('gallons')) {
-						return d.textContent.trim();
-					}
-				}
-				return '';
-			})()
-		`, &gallonsText),
-	)
+	client, err := newClient()
 	if err != nil {
 		return nil, err
 	}
-
-	tank, err := tankFromExtract(tankName, percentText, gallonsText)
+	log.Print("step: login")
+	if err := login(client); err != nil {
+		return nil, fmt.Errorf("login: %w", err)
+	}
+	log.Print("step: fetch tanks")
+	req, _ := http.NewRequest(http.MethodGet, baseURL+"/Tank", nil)
+	doc, err := fetch(client, req)
 	if err != nil {
 		return nil, err
 	}
-	return []Tank{tank}, nil
+	if isLoginPage(doc) {
+		return nil, errLoginRequired
+	}
+	return parseTanks(doc)
+}
+
+// parseTanks reads every tank row that reports a level. Rows without a gauge
+// (e.g. counter-sale accounts) are skipped.
+func parseTanks(doc *goquery.Document) ([]Tank, error) {
+	var tanks []Tank
+	var rowErr error
+	doc.Find("div.tank-row").EachWithBreak(func(_ int, row *goquery.Selection) bool {
+		bar := row.Find("div.progress-bar")
+		if bar.Length() == 0 {
+			return true
+		}
+		percentText, _ := bar.Attr("aria-valuenow")
+		tank, err := tankFromExtract(
+			row.Find("span.text-larger").First().Text(),
+			percentText,
+			bar.Parent().Parent().Text(),
+		)
+		if err != nil {
+			rowErr = err
+			return false
+		}
+		tanks = append(tanks, tank)
+		return true
+	})
+	if rowErr != nil {
+		return nil, rowErr
+	}
+	if len(tanks) == 0 {
+		return nil, fmt.Errorf("no tank readings found")
+	}
+	return tanks, nil
 }
 
 func tankFromExtract(tankName, percentText, gallonsText string) (Tank, error) {
