@@ -6,6 +6,6 @@ Allowed types: `feat`, `fix`, `docs`, `style`, `refactor`, `perf`, `test`, `buil
 
 The subject is an imperative phrase with no trailing period.
 
-Flag a health handler that starts Chrome. Health probes must read the cache only.
+Flag a health handler that scrapes the portal. Health probes must read the cache only.
 
 Flag a change that stops `/tanks` from serving the last good reading after a failed scrape.

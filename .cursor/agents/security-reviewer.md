@@ -2,7 +2,7 @@
 name: security-reviewer
 description: >-
   Reviews Staub scraper changes for exploitable issues. Use when a change
-  touches login, Chrome, env credentials, HTTP handlers, the Dockerfile,
+  touches login, the portal HTTP client, env credentials, HTTP handlers, the Dockerfile,
   or GitHub Actions permissions.
 model: inherit
 readonly: true
@@ -16,11 +16,11 @@ Review only exploitable issues. Report each finding with a severity, the file an
 
 `EMAIL` and `PASSWORD` come from the environment. Flag them when they appear in source, logs, image `ENV` or `ARG`, workflow files, or JSON responses.
 
-## Login and Chrome
+## Login and portal client
 
 Login stays on `https://edstaub.myfuelportal.com`. Flag a base URL that a request can set.
 
-`chromedp` `no-sandbox` is required in this container. Flag new flags that skip TLS verification, open remote debugging, or navigate to an arbitrary URL.
+The scraper uses `net/http` with a cookie jar. Flag a transport that skips TLS verification, a client that follows redirects off the portal host with credentials, or a request to an arbitrary URL.
 
 ## HTTP API
 

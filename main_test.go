@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
 	"net/http/httptest"
@@ -10,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/PuerkitoBio/goquery"
 )
 
 const testToken = "test-token"
@@ -282,5 +285,105 @@ func TestHealthcheck(t *testing.T) {
 	t.Cleanup(badSrv.Close)
 	if err := healthcheck(badSrv.URL); err == nil {
 		t.Fatal("expected healthcheck to fail")
+	}
+}
+
+func loadDoc(t *testing.T, path string) *goquery.Document {
+	t.Helper()
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	doc, err := goquery.NewDocumentFromReader(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return doc
+}
+
+func TestParseTanksSkipsRowsWithoutGauge(t *testing.T) {
+	tanks, err := parseTanks(loadDoc(t, "testdata/tank.html"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []Tank{{TankName: "7SF000000-1000", Gallons: 660, Percent: 66}}
+	if len(tanks) != len(want) || tanks[0] != want[0] {
+		t.Fatalf("tanks = %+v, want %+v", tanks, want)
+	}
+}
+
+func TestParseTanksNoReadings(t *testing.T) {
+	doc, _ := goquery.NewDocumentFromReader(strings.NewReader(`<div class="tank-row"><span class="text-larger">X</span></div>`))
+	if _, err := parseTanks(doc); err == nil {
+		t.Fatal("expected error when no tank has a reading")
+	}
+}
+
+const loginForm = `<form action="/Account/Login" method="post"><input name="__RequestVerificationToken" type="hidden" value="tok123" /></form>`
+
+// fakePortal mimics the portal's login flow: a session cookie is issued only
+// when the form is posted with the right token and credentials.
+func fakePortal(t *testing.T) *httptest.Server {
+	t.Helper()
+	tankPage, err := os.ReadFile("testdata/tank.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /Account/Login", func(w http.ResponseWriter, r *http.Request) {
+		http.SetCookie(w, &http.Cookie{Name: "__RequestVerificationToken", Value: "cookie-tok", Path: "/"})
+		w.Write([]byte(loginForm))
+	})
+	mux.HandleFunc("POST /Account/Login", func(w http.ResponseWriter, r *http.Request) {
+		c, err := r.Cookie("__RequestVerificationToken")
+		if err != nil || c.Value != "cookie-tok" || r.FormValue("__RequestVerificationToken") != "tok123" {
+			http.Error(w, "bad token", http.StatusInternalServerError)
+			return
+		}
+		if r.FormValue("EmailAddress") != "me@example.com" || r.FormValue("Password") != "secret" {
+			w.Write([]byte(loginForm))
+			return
+		}
+		http.SetCookie(w, &http.Cookie{Name: ".ASPXAUTH", Value: "session", Path: "/"})
+		http.Redirect(w, r, "/", http.StatusFound)
+	})
+	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`<h3 class="box-title">Account Overview</h3>`))
+	})
+	mux.HandleFunc("GET /Tank", func(w http.ResponseWriter, r *http.Request) {
+		if _, err := r.Cookie(".ASPXAUTH"); err != nil {
+			http.Redirect(w, r, "/Account/Login", http.StatusFound)
+			return
+		}
+		w.Write(tankPage)
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func withPortal(t *testing.T, srv *httptest.Server, user, pass string) {
+	t.Helper()
+	oldURL, oldEmail, oldPass := baseURL, email, password
+	baseURL, email, password = srv.URL, user, pass
+	t.Cleanup(func() { baseURL, email, password = oldURL, oldEmail, oldPass })
+}
+
+func TestScrapeLogsInAndReadsTanks(t *testing.T) {
+	withPortal(t, fakePortal(t), "me@example.com", "secret")
+	tanks, err := scrape()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tanks) != 1 || tanks[0].Gallons != 660 {
+		t.Fatalf("tanks = %+v", tanks)
+	}
+}
+
+func TestScrapeBadCredentials(t *testing.T) {
+	withPortal(t, fakePortal(t), "me@example.com", "wrong")
+	if _, err := scrape(); !errors.Is(err, errLoginRequired) {
+		t.Fatalf("err = %v, want errLoginRequired", err)
 	}
 }
